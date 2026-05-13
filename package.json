@@ -1,0 +1,18 @@
+{
+  "name": "memory-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Root scripts for the Memory Chat web app and backend",
+  "scripts": {
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "start": "concurrently -n backend,web -c cyan,magenta \"npm run dev --prefix backend\" \"npm start --prefix frontend\"",
+    "backend": "npm run dev --prefix backend",
+    "web": "npm start --prefix frontend",
+    "build": "npm run build --prefix backend && npm run build --prefix frontend",
+    "type-check": "npm run type-check --prefix frontend",
+    "check": "npm run build"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
