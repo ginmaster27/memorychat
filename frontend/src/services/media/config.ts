@@ -1,0 +1,15 @@
+export const MEDIA_CONFIG = {
+  maxUploadBytes: 2 * 1024 * 1024,
+  warnMobileBytes: 1 * 1024 * 1024,
+  targetMinBytes: 200 * 1024,
+  targetMaxBytes: 300 * 1024,
+  webpQuality: 0.7,
+  maxLongestSide: 1440,
+  maxImagesPerChat: 10,
+  maxConcurrentUploads: 2,
+  maxActiveImageMemoryBytes: 50 * 1024 * 1024,
+  expiryMs: 5 * 60 * 1000,
+  backgroundClearMs: 60 * 1000,
+  allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+  allowedExtensions: ['jpg', 'jpeg', 'png', 'webp'],
+};

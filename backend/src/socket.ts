@@ -18,7 +18,9 @@ import {
   OnlineUser,
   Message,
   SendMessagePayload,
-  AuthPayload
+  SendMediaMessagePayload,
+  AuthPayload,
+  ReportUserPayload
 } from './types';
 
 const RESERVED_OR_OFFENSIVE_WORDS = [
@@ -94,6 +96,15 @@ const usernameToEmail = new Map<string, string>();
  */
 const socketToEmail = new Map<string, string>();
 
+/**
+ * In-memory abuse reports and IP bans.
+ * These are moderation controls only and are never used to store message content.
+ * They reset when the backend process restarts.
+ */
+const reportsByUsername = new Map<string, Set<string>>();
+const bannedIpAddresses = new Set<string>();
+const REPORT_BAN_THRESHOLD = 3;
+
 function normalizeUsername(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
 }
@@ -113,7 +124,7 @@ function validateDateOfBirth(dateOfBirth: string): void {
   }
 
   if (age < 18) {
-    throw new Error('You must be at least 18 years old to use Memory Chat');
+    throw new Error('You must be at least 18 years old to use Vibly');
   }
 }
 
@@ -150,12 +161,46 @@ function generateUsername(): string {
   return `nova_${Date.now().toString(36).slice(-8)}`;
 }
 
+function getSocketIp(socket: Socket): string {
+  const forwarded = socket.handshake.headers['x-forwarded-for'];
+  const forwardedValue = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return (forwardedValue?.split(',')[0]?.trim() || socket.handshake.address || 'unknown').replace(/^::ffff:/, '');
+}
+
+function publicOnlineUsers(): PublicUserProfile[] {
+  return Array.from(onlineUsers.values()).map(u => u.profile);
+}
+
+function removeOnlineUser(email: string): OnlineUser | null {
+  const user = onlineUsers.get(email);
+  if (!user) return null;
+
+  usernameToEmail.delete(user.username);
+  onlineUsers.delete(email);
+  emailToSocket.delete(email);
+  socketToEmail.delete(user.socketId);
+  return user;
+}
+
+function broadcastOnlineUsers(io: Server): void {
+  io.emit('online-users-updated', {
+    users: publicOnlineUsers()
+  });
+}
+
 /**
  * Initialize Socket.io event handlers
  */
 export function initializeSocketEvents(io: Server) {
   io.on('connection', (socket: Socket) => {
     console.log(`New socket connection: ${socket.id}`);
+    const socketIp = getSocketIp(socket);
+
+    if (bannedIpAddresses.has(socketIp)) {
+      socket.emit('account-banned', { reason: 'Access to Vibly is unavailable from this network.' });
+      socket.disconnect(true);
+      return;
+    }
 
     /**
      * AUTHENTICATE
@@ -163,6 +208,10 @@ export function initializeSocketEvents(io: Server) {
      */
     socket.on('authenticate', async (data: AuthPayload, callback) => {
       try {
+        if (bannedIpAddresses.has(socketIp)) {
+          throw new Error('Access to Vibly is unavailable from this network');
+        }
+
         validateDateOfBirth(data.dateOfBirth || '');
         validateGender(data.gender);
         const identity = await verifyGoogleToken(data.idToken);
@@ -178,13 +227,7 @@ export function initializeSocketEvents(io: Server) {
         }
 
         if (currentEmailForSocket) {
-          const previous = onlineUsers.get(currentEmailForSocket);
-          if (previous) {
-            usernameToEmail.delete(previous.username);
-          }
-          onlineUsers.delete(currentEmailForSocket);
-          emailToSocket.delete(currentEmailForSocket);
-          socketToEmail.delete(socket.id);
+          removeOnlineUser(currentEmailForSocket);
         }
 
         const existingForEmail = onlineUsers.get(identity.email);
@@ -197,9 +240,7 @@ export function initializeSocketEvents(io: Server) {
         }
 
         if (existingForEmail) {
-          usernameToEmail.delete(existingForEmail.username);
-          onlineUsers.delete(identity.email);
-          emailToSocket.delete(identity.email);
+          removeOnlineUser(identity.email);
         }
 
         const requestedUsername = data.username ? normalizeUsername(data.username) : '';
@@ -221,6 +262,7 @@ export function initializeSocketEvents(io: Server) {
           email: identity.email,
           username,
           socketId: socket.id,
+          ipAddress: socketIp,
           profile: publicProfile,
           connectedAt: Date.now()
         };
@@ -239,13 +281,11 @@ export function initializeSocketEvents(io: Server) {
         callback({
           success: true,
           profile: publicProfile,
-          onlineUsers: Array.from(onlineUsers.values()).map(u => u.profile)
+          onlineUsers: publicOnlineUsers()
         });
 
         // Broadcast updated online users to all clients
-        io.emit('online-users-updated', {
-          users: Array.from(onlineUsers.values()).map(u => u.profile)
-        });
+        broadcastOnlineUsers(io);
       } catch (error) {
         console.error('Authentication failed:', error instanceof Error ? error.message : String(error));
         callback({
@@ -321,6 +361,53 @@ export function initializeSocketEvents(io: Server) {
       }
     });
 
+    socket.on('send-media-message', (payload: SendMediaMessagePayload) => {
+      try {
+        const senderEmail = socketToEmail.get(socket.id);
+        if (!senderEmail) return;
+
+        const sender = onlineUsers.get(senderEmail);
+        if (!sender) return;
+
+        const message: Message = {
+          id: randomUUID(),
+          from: sender.profile,
+          to: payload.recipientId,
+          content: '',
+          kind: 'image',
+          media: payload.media,
+          timestamp: Date.now(),
+          delivered: false
+        };
+
+        const recipientEmail = usernameToEmail.get(payload.recipientId);
+        const recipient = recipientEmail ? onlineUsers.get(recipientEmail) : null;
+
+        if (recipient) {
+          message.delivered = true;
+          io.to(`user:${payload.recipientId}`).emit('receive-message', {
+            message,
+            senderId: sender.username
+          });
+          console.log(`Media relayed: ${sender.username} -> ${payload.recipientId}`);
+        } else {
+          socket.emit('message-failed', {
+            recipientId: payload.recipientId,
+            reason: 'Recipient is offline'
+          });
+        }
+
+        socket.emit('message-sent', {
+          messageId: message.id,
+          delivered: message.delivered
+        });
+      } catch (error) {
+        socket.emit('message-error', {
+          error: 'Failed to send media'
+        });
+      }
+    });
+
     /**
      * TYPING
      * Ephemeral typing signal. It is relayed only to the live recipient.
@@ -341,6 +428,63 @@ export function initializeSocketEvents(io: Server) {
     });
 
     /**
+     * REPORT USER
+     * Records abuse reports in RAM only. Message content is never accepted or stored.
+     * Repeated independent reports remove the reported account and block its IP for this process.
+     */
+    socket.on('report-user', (payload: ReportUserPayload, callback) => {
+      try {
+        const reporterEmail = socketToEmail.get(socket.id);
+        if (!reporterEmail) {
+          callback({ success: false, error: 'You must be logged in to report abuse' });
+          return;
+        }
+
+        const reporter = onlineUsers.get(reporterEmail);
+        if (!reporter) {
+          callback({ success: false, error: 'Reporter session not found' });
+          return;
+        }
+
+        if (payload.reportedUserId === reporter.username) {
+          callback({ success: false, error: 'You cannot report yourself' });
+          return;
+        }
+
+        const reportedEmail = usernameToEmail.get(payload.reportedUserId);
+        const reported = reportedEmail ? onlineUsers.get(reportedEmail) : null;
+        if (!reported || !reportedEmail) {
+          callback({ success: false, error: 'That user is no longer online' });
+          return;
+        }
+
+        const reports = reportsByUsername.get(payload.reportedUserId) || new Set<string>();
+        reports.add(reporterEmail);
+        reportsByUsername.set(payload.reportedUserId, reports);
+
+        if (reports.size >= REPORT_BAN_THRESHOLD) {
+          bannedIpAddresses.add(reported.ipAddress);
+          removeOnlineUser(reportedEmail);
+          io.to(reported.socketId).emit('account-banned', {
+            reason: 'Access to Vibly is unavailable from this network.'
+          });
+          io.sockets.sockets.get(reported.socketId)?.disconnect(true);
+          reportsByUsername.delete(payload.reportedUserId);
+          broadcastOnlineUsers(io);
+          callback({ success: true, actionTaken: true });
+          return;
+        }
+
+        callback({ success: true, actionTaken: false });
+      } catch (error) {
+        callback({
+          success: false,
+          error: 'Failed to submit report'
+        });
+      }
+    });
+
+    /**
      * DISCONNECT
      * Clean up user data from memory
      * All user data is immediately wiped
@@ -349,19 +493,11 @@ export function initializeSocketEvents(io: Server) {
       const email = socketToEmail.get(socket.id);
 
       if (email) {
-        const user = onlineUsers.get(email);
-        if (user && user.socketId === socket.id) {
-          usernameToEmail.delete(user.username);
-          onlineUsers.delete(email);
-          emailToSocket.delete(email);
-        }
-        socketToEmail.delete(socket.id);
+        removeOnlineUser(email);
         console.log(`User disconnected`);
 
         // Broadcast updated online users to all remaining clients
-        io.emit('online-users-updated', {
-          users: Array.from(onlineUsers.values()).map(u => u.profile)
-        });
+        broadcastOnlineUsers(io);
       }
     });
 
@@ -371,7 +507,7 @@ export function initializeSocketEvents(io: Server) {
      */
     socket.on('get-online-users', (callback) => {
       try {
-        const users = Array.from(onlineUsers.values()).map(u => u.profile);
+        const users = publicOnlineUsers();
         callback({
           success: true,
           users
@@ -391,19 +527,11 @@ export function initializeSocketEvents(io: Server) {
     socket.on('logout', () => {
       const email = socketToEmail.get(socket.id);
       if (email) {
-        const user = onlineUsers.get(email);
-        if (user && user.socketId === socket.id) {
-          usernameToEmail.delete(user.username);
-          onlineUsers.delete(email);
-          emailToSocket.delete(email);
-        }
-        socketToEmail.delete(socket.id);
+        removeOnlineUser(email);
         console.log(`User logged out`);
 
         // Broadcast updated online users
-        io.emit('online-users-updated', {
-          users: Array.from(onlineUsers.values()).map(u => u.profile)
-        });
+        broadcastOnlineUsers(io);
       }
 
       socket.disconnect(true);
@@ -422,7 +550,7 @@ export function getOnlineUsersCount(): number {
  * Get all online users (for monitoring)
  */
 export function getAllOnlineUsers(): PublicUserProfile[] {
-  return Array.from(onlineUsers.values()).map(u => u.profile);
+  return publicOnlineUsers();
 }
 
 /**
@@ -434,4 +562,6 @@ export function clearOnlineUsers(): void {
   emailToSocket.clear();
   usernameToEmail.clear();
   socketToEmail.clear();
+  reportsByUsername.clear();
+  bannedIpAddresses.clear();
 }

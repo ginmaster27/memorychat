@@ -1,5 +1,5 @@
 /**
- * Memory Chat Backend Server
+ * Vibly Backend Server
  * Privacy-first, memory-only messaging application
  * 
  * ARCHITECTURE:
@@ -17,17 +17,23 @@ import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { initializeSocketEvents, getOnlineUsersCount, getAllOnlineUsers, clearOnlineUsers } from './socket';
+import { createMediaRouter } from './media/routes';
+import { MEDIA_CONFIG } from './media/config';
+import { temporaryMediaStorage } from './media/storage';
 
 // Load environment variables
 dotenv.config();
 
 const app: Express = express();
 const httpServer = createServer(app);
+const corsOrigin = process.env.FRONTEND_URL
+  ? process.env.FRONTEND_URL.split(',').map(origin => origin.trim()).filter(Boolean)
+  : true;
 
 // Configure Socket.io with CORS
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || true,
+    origin: corsOrigin,
     methods: ['GET', 'POST'],
     credentials: true
   }
@@ -35,9 +41,10 @@ const io = new SocketIOServer(httpServer, {
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || true,
+  origin: corsOrigin,
   credentials: true
 }));
+app.use('/api/media', express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: MEDIA_CONFIG.maxUploadBytes }), createMediaRouter(process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 4000}`));
 app.use(express.json());
 
 // Initialize Socket.io events
@@ -72,7 +79,7 @@ app.get('/api/monitoring/online-users', (req, res) => {
  */
 app.get('/', (req, res) => {
   res.json({
-    message: 'Memory Chat Backend',
+    message: 'Vibly Backend',
     description: 'Privacy-first, memory-only messaging application',
     version: '1.0.0',
     architecture: 'RAM-only, no persistence'
@@ -92,10 +99,10 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 
 // Start server
 const PORT = process.env.PORT || 4000;
-httpServer.listen(PORT, () => {
+const activeServer = httpServer.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════╗
-║     Memory Chat Backend Server             ║
+║     Vibly Backend Server                   ║
 ║     Privacy-First Architecture             ║
 ║     Socket.io Real-Time Messaging          ║
 ╠════════════════════════════════════════════╣
@@ -105,18 +112,28 @@ httpServer.listen(PORT, () => {
 ║  Messages auto-destroyed after relay      ║
 ╚════════════════════════════════════════════╝
   `);
-  console.log(`Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+  console.log(`Frontend URL: ${process.env.FRONTEND_URL || 'Expo app / web dev server'}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
-// Graceful shutdown
-process.on('SIGINT', () => {
+let isShuttingDown = false;
+
+function shutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   console.log('\nShutting down server...');
   clearOnlineUsers();
-  httpServer.close(() => {
+  void temporaryMediaStorage.clear();
+  io.close();
+  activeServer.close(() => {
     console.log('Server closed');
     process.exit(0);
   });
-});
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+// Graceful shutdown
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
 
 export { app, io };

@@ -29,6 +29,7 @@ pnpm-debug.log*
 # Runtime and cache files
 .DS_Store
 .vite/
+frontend/.expo/
 coverage/
 .nyc_output/
 

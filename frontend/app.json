@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "Vibly",
+    "slug": "vibly",
+    "scheme": "vibly",
+    "icon": "./assets/logo.png",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      }
+    }
+  }
+}

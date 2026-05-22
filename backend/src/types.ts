@@ -23,6 +23,7 @@ export interface OnlineUser {
   email: string;
   username: string;
   socketId: string;
+  ipAddress: string;
   profile: PublicUserProfile;
   connectedAt: number;
 }
@@ -37,6 +38,13 @@ export interface Message {
   from: PublicUserProfile;
   to: string; // recipient username
   content: string;
+  kind?: 'text' | 'image';
+  media?: {
+    id: string;
+    thumbnail: string;
+    expiresAt: number;
+    mediaUrl: string;
+  };
   timestamp: number;
   delivered: boolean;
 }
@@ -54,6 +62,21 @@ export interface AuthPayload {
 export interface SendMessagePayload {
   recipientId: string;
   content: string;
+}
+
+export interface SendMediaMessagePayload {
+  recipientId: string;
+  media: {
+    id: string;
+    thumbnail: string;
+    expiresAt: number;
+    mediaUrl: string;
+  };
+}
+
+export interface ReportUserPayload {
+  reportedUserId: string;
+  reason: 'illegal_content' | 'harassment_or_abuse' | 'spam_or_scam' | 'other_abuse';
 }
 
 export interface ReceiveMessagePayload {
